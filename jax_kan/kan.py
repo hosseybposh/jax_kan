@@ -27,21 +27,24 @@ class KANLinear(nn.Module):
         self.grid = self.variable('buffers', 'grid', lambda: grid)
 
         # Initialize the parameters
-        self.base_weight = self.param('base_weight', kaiming_uniform(a=jnp.sqrt(5) * self.scale_base), (self.out_features, self.in_features))
+        self.base_weight = self.param('base_weight', kaiming_uniform(jnp.sqrt(5) * self.scale_base), (self.out_features, self.in_features))
         self.spline_weight = self.param('spline_weight', nn.initializers.lecun_normal(), (self.out_features, self.in_features, self.grid_size + self.spline_order))
 
         # Initializing spline weight with noise and transformations
         key1, key2 = jax.random.split(self.key)
         noise = jax.random.uniform(key1, (self.out_features, self.in_features, self.grid_size + 1), minval=-0.5, maxval=0.5) * self.scale_noise / self.grid_size
         # Assuming `curve2coeff` transformation function exists
-        adjusted_spline_weight = (self.scale_spline if not self.enable_standalone_scale_spline else 1.0) * self.curve2coeff(grid.T[self.spline_order : -self.spline_order], noise)
+        adjusted_spline_weight = (self.scale_spline if not self.enable_standalone_scale_spline else 1.0) * self.curve2coeff(grid.T[self.spline_order : -self.spline_order], noise, grid)
         self.spline_weight = adjusted_spline_weight
 
         if self.enable_standalone_scale_spline:
             self.spline_scaler = self.param('spline_scaler', kaiming_uniform(a=jnp.sqrt(5) * self.scale_spline), (self.out_features, self.in_features))
+    
+    def get_grid(self):
+        """Method to safely access the grid buffer for testing or diagnostics."""
+        return self.grid.value
 
-
-    def b_splines(self, x):
+    def b_splines(self, x, grid):
         """
         Compute the B-spline bases for the given input tensor in Jax.
 
@@ -53,7 +56,7 @@ class KANLinear(nn.Module):
         """
         assert x.ndim == 2 and x.shape[1] == self.in_features
 
-        grid = self.grid.value  # Access the non-trainable grid variable
+        # grid = self.grid.value  # Access the non-trainable grid variable
         x = x[:, :, None]  # Expand dimensions for broadcasting
 
         # Compute initial B-spline bases
@@ -67,7 +70,7 @@ class KANLinear(nn.Module):
 
         return bases  # No need to call .contiguous() as Jax handles memory differently
     
-    def curve2coeff(self, x, y):
+    def curve2coeff(self, x, y, grid):
         """
         Compute the coefficients of the curve that interpolates the given points in Jax.
 
@@ -81,7 +84,7 @@ class KANLinear(nn.Module):
         assert x.ndim == 2 and x.shape[1] == self.in_features
         assert y.shape == (x.shape[0], self.in_features, self.out_features)
 
-        A = self.b_splines(x).transpose(1, 0, 2)  # (in_features, batch_size, grid_size + spline_order)
+        A = self.b_splines(x, grid).transpose(1, 0, 2)  # (in_features, batch_size, grid_size + spline_order)
         B = y.transpose(1, 0, 2)  # (in_features, batch_size, out_features)
 
         # Solve least squares problem
@@ -127,7 +130,7 @@ class KANLinear(nn.Module):
         base_output = nn.Dense(features=self.out_features)(self.base_activation(x), self.base_weight)
 
         # Compute B-splines and reshape for linear transformation
-        b_splines = self.b_splines(x)
+        b_splines = self.b_splines(x, grid=self.grid.value)
         b_splines_flat = b_splines.reshape(x.shape[0], -1)
 
         # Scaled spline weight and linear transformation
@@ -137,43 +140,61 @@ class KANLinear(nn.Module):
 
         # Combining base and spline outputs
         return base_output + spline_output
+
+# Usage in a testing scenario
+def test_grid_shape():
+    key = jax.random.PRNGKey(0)
+    model = KANLinear(in_features=10, out_features=5, key=key)  # adjust init parameters as needed
+    x_dummy = jnp.ones((1, 10))  # adjust shape as necessary
+
+    # Initialize the model to setup buffers and parameters
+    params = model.init(key, x_dummy)
     
-class KAN(nn.Module):
-    layers_hidden: list
-    grid_size: int = 5
-    spline_order: int = 3
-    scale_noise: float = 0.1
-    scale_base: float = 1.0
-    scale_spline: float = 1.0
-    base_activation: callable = nn.silu
-    grid_eps: float = 0.02
-    grid_range: tuple = (-1, 1)
+    # Create an output using the apply method to access the grid
+    output, updated_state = model.apply(params, x_dummy, method=model.get_grid)
+    
+    # Now 'output' contains the grid, and you can assert its properties
+    assert output.shape == (10, 9), "Grid shape does not match expected values"  # example assertion
 
-    def setup(self):
-        # Create a list of KANLinear layers
-        self.layers = [
-            KANLinear(
-                in_features=in_features,
-                out_features=out_features,
-                grid_size=self.grid_size,
-                spline_order=self.spline_order,
-                scale_noise=self.scale_noise,
-                scale_base=self.scale_base,
-                scale_spline=self.scale_spline,
-                base_activation=self.base_activation,
-                grid_eps=self.grid_eps,
-                grid_range=self.grid_range,
-            ) for in_features, out_features in zip(self.layers_hidden, self.layers_hidden[1:])
-        ]
+if __name__ == "__main__":
+    test_grid_shape()
 
-    def __call__(self, x, update_grid=False):
-        # Process each layer
-        for layer in self.layers:
-            if update_grid:
-                x = layer.update_grid(x)  # This would need to be adapted if you include grid updating
-            x = layer(x)
-        return x
+# class KAN(nn.Module):
+#     layers_hidden: list
+#     grid_size: int = 5
+#     spline_order: int = 3
+#     scale_noise: float = 0.1
+#     scale_base: float = 1.0
+#     scale_spline: float = 1.0
+#     base_activation: callable = nn.silu
+#     grid_eps: float = 0.02
+#     grid_range: tuple = (-1, 1)
 
-    def regularization_loss(self, regularize_activation=1.0, regularize_entropy=1.0):
-        # Sum up regularization losses from all layers
-        return sum(layer.regularization_loss(regularize_activation, regularize_entropy) for layer in self.layers)
+#     def setup(self):
+#         # Create a list of KANLinear layers
+#         self.layers = [
+#             KANLinear(
+#                 in_features=in_features,
+#                 out_features=out_features,
+#                 grid_size=self.grid_size,
+#                 spline_order=self.spline_order,
+#                 scale_noise=self.scale_noise,
+#                 scale_base=self.scale_base,
+#                 scale_spline=self.scale_spline,
+#                 base_activation=self.base_activation,
+#                 grid_eps=self.grid_eps,
+#                 grid_range=self.grid_range,
+#             ) for in_features, out_features in zip(self.layers_hidden, self.layers_hidden[1:])
+#         ]
+
+#     def __call__(self, x, update_grid=False):
+#         # Process each layer
+#         for layer in self.layers:
+#             if update_grid:
+#                 x = layer.update_grid(x)  # This would need to be adapted if you include grid updating
+#             x = layer(x)
+#         return x
+
+#     def regularization_loss(self, regularize_activation=1.0, regularize_entropy=1.0):
+#         # Sum up regularization losses from all layers
+#         return sum(layer.regularization_loss(regularize_activation, regularize_entropy) for layer in self.layers)
