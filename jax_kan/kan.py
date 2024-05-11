@@ -4,8 +4,6 @@ from flax import linen as nn
 from jax.nn.initializers import variance_scaling, kaiming_uniform
 from jax import lax, ops
 from typing import Any
-from jax.scipy.linalg import lstsq
-from jax.nn import linear
 
 class KANLinear(nn.Module):
     in_features: int
@@ -49,12 +47,40 @@ class KANLinear(nn.Module):
                                          self.grid_size + self.spline_order))
     
     # TODO I wonder if the shape already calculates things correctly automatically
-    def init_spline_weights(self, rng, shape): # this may nt work becaue I use module parameters like self.grid_size within the initialization
+    def init_spline_weights(self, rng, shape):
+        '''
+        Initializes the spline weights for the Kan module.
+
+        Parameters:
+        - rng: The random number generator.
+        - shape: The shape of the spline weights.
+
+        Returns:
+        - The initialized spline weights.
+
+        Note:
+        - This function may not work if module parameters like self.grid_size are used within the initialization.
+        '''
+        grid = self.variables['buffers']['grid']
         noise = (jax.random.uniform(rng, (self.grid_size + 1, self.in_features, self.out_features)) - 0.5) * self.scale_noise / self.grid_size
         scale = self.scale_spline if not self.enable_standalone_scale_spline else 1.0
-        return scale * self.curve2coeff(self.grid.T[self.spline_order:-self.spline_order], noise)
+        return scale * self.curve2coeff(grid.T[self.spline_order:-self.spline_order], noise, grid)
     
     def b_splines(self, x, grid):
+        '''
+        Compute B-spline basis functions for given input data and grid.
+
+        Args:
+            x (ndarray): Input data of shape (batch_size, num_points, in_features).
+            grid (ndarray): Grid points for B-spline basis functions of shape (num_points, grid_size + spline_order + 1).
+
+        Returns:
+            ndarray: B-spline basis functions of shape (batch_size, in_features, grid_size + spline_order).
+
+        Raises:
+            AssertionError: If the input data `x` does not have the expected shape.
+
+        '''
         assert x.ndim == 2 and x.shape[1] == self.in_features
         x = x[:, :, None]  # Expand dims to match grid dimensions
         bases = ((x >= grid[:, :-1]) & (x < grid[:, 1:])).astype(x.dtype)
@@ -90,33 +116,82 @@ class KANLinear(nn.Module):
         A = self.b_splines(x, grid).transpose((1, 0, 2))  # (in_features, batch_size, grid_size + spline_order)
         B = y.transpose((1, 0, 2))  # (in_features, batch_size, out_features)
 
-        solution = lstsq(A, B, rcond=None)[0]  # (in_features, grid_size + spline_order, out_features)
-        result = solution.transpose((2, 0, 1))  # (out_features, in_features, grid_size + spline_order)
+        # Define a function to solve lstsq for each feature
+        def solve_feature(a, b):
+            return jnp.linalg.lstsq(a, b, rcond=None)[0]  # (grid_size + spline_order, out_features)
 
+        # Vectorize the function over the first axis (in_features)
+        vectorized_solve = jax.vmap(solve_feature, in_axes=(0, 0), out_axes=0)
+
+        # Apply the vectorized function
+        coeffs = vectorized_solve(A, B)  # (in_features, grid_size + spline_order, out_features)
+        result = coeffs.transpose((2, 0, 1))  # Transpose to (out_features, in_features, grid_size + spline_order)
+        
         assert result.shape == (self.out_features, self.in_features, self.grid_size + self.spline_order)
         return result
     
     def __call__(self, x):
-        assert x.ndim == 2 and x.shape[1] == self.in_features
-        
-        base_output = linear(self.base_activation(x), self.base_weight)
+        '''
+        Applies the Kan function to the input tensor x.
 
+        Args:
+            x (jax.numpy.ndarray): Input tensor of shape (batch_size, in_features).
+
+        Returns:
+            jax.numpy.ndarray: Output tensor of shape (batch_size, out_features).
+
+        Raises:
+            AssertionError: If the input tensor does not have the expected shape.
+
+        '''
+        assert x.ndim == 2 and x.shape[1] == self.in_features
+
+        base_output = jnp.dot(self.base_activation(x), self.base_weight.T)
         # Calculate scaled_spline_weight within the call
-        scaled_spline_weight = self.spline_weight * (self.spline_scaler[:, None] if self.enable_standalone_scale_spline else 1.0)
+        print(self.spline_weight.shape, self.spline_scaler[..., None].shape)
+        scaled_spline_weight = self.spline_weight * (self.spline_scaler[..., None] if self.enable_standalone_scale_spline else 1.0)
 
         # Calculate spline output using b_splines
-        grid = self.grid.value
+        grid = self.variables['buffers']['grid']
+        print(grid.shape)
         b_spline_out = self.b_splines(x, grid).reshape((x.shape[0], -1))
-        spline_output = linear(b_spline_out, scaled_spline_weight.reshape((self.out_features, -1)))
+        spline_output = jnp.dot(b_spline_out, scaled_spline_weight.reshape((self.out_features, -1)).T)
 
         return base_output + spline_output
     
     def update_grid(self, x, margin=0.01):
+        '''
+        Updates the grid and spline weights in the module state based on the input data.
+
+        Parameters:
+        - x: The input data of shape (batch, in_features).
+        - margin: The margin added to the range of the input data for computing the uniform grid steps. Default is 0.01.
+
+        Returns:
+        - new_grid: The updated grid of shape (out_features, grid_size + 1).
+        - new_spline_weight: The updated spline weights of shape (in_features, out_features, coeff).
+
+        Raises:
+        - AssertionError: If the input data has incorrect shape.
+
+        This function updates the grid and spline weights in the module state based on the input data. It performs the following steps:
+        1. Computes the splines using the current grid and the input data.
+        2. Adjusts the spline weights based on the spline scaler and the standalone scale spline flag.
+        3. Computes the spline output without reduction.
+        4. Sorts each channel of the input data individually to collect data distribution.
+        5. Computes the adaptive grid by selecting values from the sorted input data.
+        6. Computes the uniform grid steps based on the range of the sorted input data and the margin.
+        7. Interpolates between the adaptive and uniform grid to obtain the final grid.
+        8. Transposes the grid and computes the new spline weights based on the input data, spline output, and the new grid.
+        9. Returns the updated grid and spline weights.
+
+        Note: The module state refers to the internal state of the module that holds the grid and spline weights.
+        '''
         assert x.ndim == 2 and x.shape[1] == self.in_features
         batch = x.shape[0]
 
         # Access the current grid from state
-        current_grid = self.grid.value
+        current_grid = self.variables['buffers']['grid']
         
         # Compute splines with the correct grid argument
         splines = self.b_splines(x, current_grid)  # (batch, in_features, coeff)
