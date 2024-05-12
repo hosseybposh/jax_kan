@@ -1,36 +1,41 @@
 import pytest
-import torch
 import jax
-import jax.numpy as jnp
+from jax import random
 import numpy as np
-from jax_kan.kan import KANLinear as JxKANLinear  # Your Jax implementation
-from .pytorch_kan import KANLinear as PyKANLinear  # Your local PyTorch implementation
+from jax_kan.kan import KANLinear as FlaxKANLinear
+from .pytorch_kan import KANLinear as TorchKANLinear
 
-def test_initialization():
-    # Create instances of both models
-    key = jax.random.PRNGKey(0)
-    py_model = PyKANLinear(10, 5)
-    jx_model = JxKANLinear(10, 5, key=key)
+@pytest.fixture
+def flax_module():
+    key = random.PRNGKey(0)  # Using a fixed key for reproducibility
+    in_features = 10
+    out_features = 5
+    module = FlaxKANLinear(in_features, out_features, key)
+    dummy_input = jax.random.uniform(key, (13, in_features))
+    variables = module.init(key, dummy_input)
+    return module, variables
 
-    # Test grid initialization
-    # assert py_model.grid.shape == jx_model.grid.shape, "Grid shapes do not match"
-    # assert py_model.grid.dtype == torch.from_numpy(np.array(jx_model.grid)).dtype, "Grid data types do not match"
+@pytest.fixture
+def torch_module():
+    return TorchKANLinear(in_features=10, out_features=5)
 
-    # # Test base_weight initialization
-    # assert py_model.base_weight.shape == jx_model.base_weight.shape, "Base weight shapes do not match"
-    # assert py_model.base_weight.dtype == torch.from_numpy(np.array(jx_model.base_weight)).dtype, "Base weight data types do not match"
+def test_parameter_shapes(flax_module, torch_module):
+    _, flax_variables = flax_module
 
-    # # Test spline_weight initialization
-    # assert py_model.spline_weight.shape == jx_model.spline_weight.shape, "Spline weight shapes do not match"
-    # assert py_model.spline_weight.dtype == torch.from_numpy(np.array(jx_model.spline_weight)).dtype, "Spline weight data types do not match"
+    # Check shapes for all weights and buffers
+    param_checks = {
+        'base_weight': ('params', torch_module.base_weight),
+        'spline_weight': ('params', torch_module.spline_weight),
+        'grid': ('buffers', torch_module.grid)
+    }
 
-    # # Test spline_scaler initialization if enabled
-    # if py_model.enable_standalone_scale_spline:
-    #     assert hasattr(jx_model, 'spline_scaler'), "Jax model missing spline_scaler attribute"
-    #     assert py_model.spline_scaler.shape == jx_model.spline_scaler.shape, "Spline scaler shapes do not match"
-    #     assert py_model.spline_scaler.dtype == torch.from_numpy(np.array(jx_model.spline_scaler)).dtype, "Spline scaler data types do not match"
+    if torch_module.enable_standalone_scale_spline:
+        param_checks['spline_scaler'] = ('params', torch_module.spline_scaler)
 
-    # Additional tests for any other parameters or buffers initialized in the setup
-    # ...
-
-# Add additional pytest markers if needed to parameterize or configure the test environment
+    for name, (flax_category, torch_tensor) in param_checks.items():
+        print(f"Checking {name}")
+        flax_shape = flax_variables[flax_category][name].shape
+        torch_shape = torch_tensor.shape
+        assert flax_shape == torch_shape, f"Shape mismatch for {name}: Flax {flax_shape}, Torch {torch_shape}"
+        if name == 'grid':
+            np.testing.assert_allclose(np.array(flax_variables[flax_category][name]), torch_tensor.detach().numpy(), atol=1e-5)
