@@ -148,12 +148,12 @@ class KANLinear(nn.Module):
 
         base_output = jnp.dot(self.base_activation(x), self.base_weight.T)
         # Calculate scaled_spline_weight within the call
-        print(self.spline_weight.shape, self.spline_scaler[..., None].shape)
+        # print(self.spline_weight.shape, self.spline_scaler[..., None].shape)
         scaled_spline_weight = self.spline_weight * (self.spline_scaler[..., None] if self.enable_standalone_scale_spline else 1.0)
 
         # Calculate spline output using b_splines
         grid = self.variables['buffers']['grid']
-        print(grid.shape)
+        # print(grid.shape)
         b_spline_out = self.b_splines(x, grid).reshape((x.shape[0], -1))
         spline_output = jnp.dot(b_spline_out, scaled_spline_weight.reshape((self.out_features, -1)).T)
 
@@ -225,3 +225,39 @@ class KANLinear(nn.Module):
         new_spline_weight = self.curve2coeff(x, unreduced_spline_output, new_grid)
         
         return new_grid, new_spline_weight
+
+class KAN(nn.Module):
+    layers_hidden: list
+    grid_size: int = 5
+    spline_order: int = 3
+    scale_noise: float = 0.1
+    scale_base: float = 1.0
+    scale_spline: float = 1.0
+    base_activation: callable = nn.silu  # nn.silu corresponds to torch.nn.SiLU
+    grid_eps: float = 0.02
+    grid_range: list = [-1, 1]
+
+    @nn.compact
+    def __call__(self, x, update_grid=False):
+        for in_features, out_features in zip(self.layers_hidden[:-1], self.layers_hidden[1:]):
+            x = KANLinear(in_features, out_features,
+                          grid_size=self.grid_size,
+                          spline_order=self.spline_order,
+                          scale_noise=self.scale_noise,
+                          scale_base=self.scale_base,
+                          scale_spline=self.scale_spline,
+                          base_activation=self.base_activation,
+                          grid_eps=self.grid_eps,
+                          grid_range=self.grid_range,
+                          name=f"kan_linear_{in_features}_{out_features}")(x)
+            if update_grid:
+                # The update_grid method needs to be implemented within KANLinear
+                x = self.layers[-1].update_grid(x)
+        return x
+
+    def regularization_loss(self, regularize_activation=1.0, regularize_entropy=1.0):
+        # Calculate and sum regularization loss from all layers
+        total_loss = 0.0
+        for layer in self.layers:
+            total_loss += layer.regularization_loss(regularize_activation, regularize_entropy)
+        return total_loss
