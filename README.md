@@ -9,5 +9,5 @@ An efficient pytorch implementation which is the inspiration for this repo: [lin
 
 
 # IMPORTANT NOTE
-This is a work in progress. It's a port from efficient implementation repo mentioned earlier. Currently woring on writing very strict tests to ensre the outputs from both implementations are equal. Feel free to contribute please.
+This is a work in progress. It's a port from efficient implementation repo mentioned earlier. Currently everything is tested against the pytorch implementation except for the `update_grid` method. Flax is pretty strict with parameter manipulation outside of computational graph functions so trying to figure out a clean way to do that. Please feel free to contribute.
 ## Installation
