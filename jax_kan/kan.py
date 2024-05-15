@@ -30,22 +30,20 @@ class KANLinear(nn.Module):
         self.variable('buffers', 'grid', lambda: grid)
 
         # Base weight initialization
-        self.base_weight = self.param('base_weight',
-                                      kaiming_uniform(),
-                                      (self.out_features,
-                                       self.in_features))
+        self.base_weight = self.variable('params', 'base_weight',
+                                         lambda: kaiming_uniform()((self.out_features, self.in_features)))
         
         # Spline scaler initialization
         if self.enable_standalone_scale_spline:
-            self.spline_scaler = self.param('spline_scaler', kaiming_uniform(), (self.out_features, self.in_features))
+            self.spline_scaler = self.variable('params', 'spline_scaler',
+                                               lambda: kaiming_uniform()((self.out_features, self.in_features)))
         
         # Spline weight initialization
-        self.spline_weight = self.param('spline_weight',
-                                        self.init_spline_weights,
-                                        (self.out_features,
-                                         self.in_features,
-                                         self.grid_size + self.spline_order))
-    
+        self.spline_weight = self.variable('params', 'spline_weight',
+                                           lambda: self.init_spline_weights((self.out_features,
+                                                                             self.in_features,
+                                                                             self.grid_size + self.spline_order)))
+        
     # TODO I wonder if the shape already calculates things correctly automatically
     def init_spline_weights(self, rng, shape):
         '''
@@ -224,7 +222,7 @@ class KANLinear(nn.Module):
         new_grid = grid.T
         new_spline_weight = self.curve2coeff(x, unreduced_spline_output, new_grid)
         
-        return new_grid, new_spline_weight
+        return {'grid': new_grid, 'spline_weight': new_spline_weight}
 
 class KAN(nn.Module):
     layers_hidden: list
@@ -235,24 +233,25 @@ class KAN(nn.Module):
     scale_spline: float = 1.0
     base_activation: callable = nn.silu  # nn.silu corresponds to torch.nn.SiLU
     grid_eps: float = 0.02
-    grid_range: list = [-1, 1]
+    grid_range: tuple = (-1, 1)
 
-    @nn.compact
+    def setup(self):
+        self.layers = [KANLinear(in_features, out_features, self.grid_size, self.spline_order,
+                                 self.scale_noise, self.scale_base, self.scale_spline, self.base_activation,
+                                 self.grid_eps, self.grid_range)
+                       for in_features, out_features in zip(self.layers_hidden, self.layers_hidden[1:])]
+
     def __call__(self, x, update_grid=False):
-        for in_features, out_features in zip(self.layers_hidden[:-1], self.layers_hidden[1:]):
-            x = KANLinear(in_features, out_features,
-                          grid_size=self.grid_size,
-                          spline_order=self.spline_order,
-                          scale_noise=self.scale_noise,
-                          scale_base=self.scale_base,
-                          scale_spline=self.scale_spline,
-                          base_activation=self.base_activation,
-                          grid_eps=self.grid_eps,
-                          grid_range=self.grid_range,
-                          name=f"kan_linear_{in_features}_{out_features}")(x)
+        updates = {}
+        for i, layer in enumerate(self.layers):
             if update_grid:
-                # The update_grid method needs to be implemented within KANLinear
-                x = self.layers[-1].update_grid(x)
+                layer_updates = self.apply({'params': self.params[f'layers_{i}'], 'buffers': self.variables['buffers'][f'layers_{i}']},
+                                           x, method=KANLinear.update_grid)
+                updates[f'layers_{i}'] = layer_updates
+            x = layer(x)
+        if updates:
+            self.variables = jax.tree_multimap(lambda var, update: update if update is not None else var,
+                                               self.variables, updates)
         return x
 
     def regularization_loss(self, regularize_activation=1.0, regularize_entropy=1.0):
