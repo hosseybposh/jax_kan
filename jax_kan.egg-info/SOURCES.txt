@@ -1,0 +1,11 @@
+README.md
+setup.py
+jax_kan/__init__.py
+jax_kan/kan.py
+jax_kan.egg-info/PKG-INFO
+jax_kan.egg-info/SOURCES.txt
+jax_kan.egg-info/dependency_links.txt
+jax_kan.egg-info/top_level.txt
+tests/__init__.py
+tests/pytorch_kan.py
+tests/test_KANLinear.py

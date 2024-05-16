@@ -2,7 +2,6 @@ import torch
 import torch.nn.functional as F
 import math
 
-
 class KANLinear(torch.nn.Module):
     def __init__(
         self,
@@ -97,11 +96,9 @@ class KANLinear(torch.nn.Module):
                 (x - grid[:, : -(k + 1)])
                 / (grid[:, k:-1] - grid[:, : -(k + 1)])
                 * bases[:, :, :-1]
-            ) + (
-                (grid[:, k + 1 :] - x)
+            ) + ((grid[:, k + 1 :] - x)
                 / (grid[:, k + 1 :] - grid[:, 1:(-k)])
-                * bases[:, :, 1:]
-            )
+                * bases[:, :, 1:])
 
         assert bases.size() == (
             x.size(0),
@@ -129,8 +126,7 @@ class KANLinear(torch.nn.Module):
         )  # (in_features, batch_size, grid_size + spline_order)
         B = y.transpose(0, 1)  # (in_features, batch_size, out_features)
         solution = torch.linalg.lstsq(
-            A, B
-        ).solution  # (in_features, grid_size + spline_order, out_features)
+            A, B).solution  # (in_features, grid_size + spline_order, out_features)
         result = solution.permute(
             2, 0, 1
         )  # (out_features, in_features, grid_size + spline_order)
@@ -173,15 +169,12 @@ class KANLinear(torch.nn.Module):
         unreduced_spline_output = unreduced_spline_output.permute(
             1, 0, 2
         )  # (batch, in, out)
-        
+
         # sort each channel individually to collect data distribution
         x_sorted = torch.sort(x, dim=0)[0]
         grid_adaptive = x_sorted[
             torch.linspace(
-                0, batch - 1, self.grid_size + 1, dtype=torch.int64, device=x.device
-            )
-        ]
-
+                0, batch - 1, self.grid_size + 1, dtype=torch.int64, device=x.device)]
         uniform_step = (x_sorted[-1] - x_sorted[0] + 2 * margin) / self.grid_size
         grid_uniform = (
             torch.arange(
@@ -194,18 +187,13 @@ class KANLinear(torch.nn.Module):
 
         grid = self.grid_eps * grid_uniform + (1 - self.grid_eps) * grid_adaptive
         grid = torch.concatenate(
-            [
-                grid[:1]
-                - uniform_step
-                * torch.arange(self.spline_order, 0, -1, device=x.device).unsqueeze(1),
-                grid,
-                grid[-1:]
-                + uniform_step
-                * torch.arange(1, self.spline_order + 1, device=x.device).unsqueeze(1),
-            ],
-            dim=0,
-        )
-
+            [grid[:1]
+            - uniform_step
+            * torch.arange(self.spline_order, 0, -1, device=x.device).unsqueeze(1),
+            grid,
+            grid[-1:]
+            + uniform_step
+            * torch.arange(1, self.spline_order + 1, device=x.device).unsqueeze(1)], dim=0)
         self.grid.copy_(grid.T)
         self.spline_weight.data.copy_(self.curve2coeff(x, unreduced_spline_output))
 
@@ -243,8 +231,7 @@ class KAN(torch.nn.Module):
         scale_spline=1.0,
         base_activation=torch.nn.SiLU,
         grid_eps=0.02,
-        grid_range=[-1, 1],
-    ):
+        grid_range=[-1, 1]):
         super(KAN, self).__init__()
         self.grid_size = grid_size
         self.spline_order = spline_order
