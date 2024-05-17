@@ -77,6 +77,10 @@ def test_forward(torch_module, flax_module):
     with pytest.raises(AssertionError):
         flax_model.apply(flax_params, wrong_input_tensor)
 
+def assert_not_allclose(a, b, rtol=1e-05, atol=1e-08, err_msg=""):
+    if np.allclose(a, b, rtol=rtol, atol=atol):
+        raise AssertionError(err_msg)
+
 def test_update_grid_and_spline_weights(torch_module, flax_module):
     flax_model, flax_params = flax_module
     # Copy parameters from PyTorch to Flax
@@ -93,16 +97,33 @@ def test_update_grid_and_spline_weights(torch_module, flax_module):
     batch_size = 13
     input_tensor = torch.randn(batch_size, in_features)
     
+    # Compare values before updating
+    old_torch_grid = torch_module.grid.detach().clone()
+    old_torch_spline_weight = torch_module.spline_weight.detach().clone()
+    old_flax_grid = flax_params['buffers']['grid']
+    old_flax_spline_weight = flax_params['params']['spline_weight']
+    assert old_torch_grid.shape == old_flax_grid.shape, "Grid shapes do not match"
+    assert old_torch_spline_weight.shape == old_flax_spline_weight.shape, "Spline weight shapes do not match"
+    np.testing.assert_allclose(old_torch_grid.numpy(), old_flax_grid, atol=1e-6, rtol=1e-6, err_msg="Grid values do not match")
+    np.testing.assert_allclose(old_torch_spline_weight.numpy(), old_flax_spline_weight, atol=1e-6, rtol=1e-6, err_msg="Spline weight values do not match")
+
     # Update grids and spline weights using PyTorch model
     torch_module.update_grid(input_tensor)
     torch_grid = torch_module.grid.detach().clone()
     torch_spline_weight = torch_module.spline_weight.detach().clone()
 
     # Update grids and spline weights using Flax model
-    flax_output = flax_model.apply(flax_params, jnp.array(input_tensor.numpy()), True)
+    _, flax_params = flax_model.apply(flax_params,
+                                      x = jnp.array(input_tensor.numpy()),
+                                      method=flax_model.update_grid,
+                                      mutable=['buffers', 'params'])
 
     flax_grid = flax_params['buffers']['grid']
     flax_spline_weight = flax_params['params']['spline_weight']
+
+    # Now we first test to see if the values have changed at all
+    assert_not_allclose(torch_grid.numpy(), old_torch_grid.numpy(), atol=1e-6, rtol=1e-6, err_msg="Torch didn't work")
+    assert_not_allclose(flax_spline_weight, old_flax_spline_weight, atol=1e-6, rtol=1e-6, err_msg="Flax didn't work")
 
     # Comparing shapes and values
     assert torch_grid.shape == flax_grid.shape, "Grid shapes do not match"
@@ -110,4 +131,4 @@ def test_update_grid_and_spline_weights(torch_module, flax_module):
     np.testing.assert_allclose(torch_grid.numpy(), flax_grid, atol=1e-6, rtol=1e-6, err_msg="Grid values do not match")
     np.testing.assert_allclose(torch_spline_weight.numpy(), flax_spline_weight, atol=1e-6, rtol=1e-6, err_msg="Spline weight values do not match")
 
-    print("Test passed: Grid and spline weights match between PyTorch and Flax.")
+    # print("Test passed: Grid and spline weights match between PyTorch and Flax.")
