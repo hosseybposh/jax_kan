@@ -224,23 +224,22 @@ def test_compare_torchjax(torch_module, flax_module):
     np.testing.assert_allclose(A_t.detach().numpy(), np.array(A_f), atol=1e-6, rtol=1e-6, err_msg="A do not match")
     np.testing.assert_allclose(B_t.detach().numpy(), np.array(B_f), atol=1e-5, rtol=1e-5, err_msg="B do not match")
 
-    # # Define a function to solve lstsq for each feature
-    # def solve_feature(a, b):
-    #     return jnp.linalg.lstsq(a, b, rcond=None)[0]  # (grid_size + spline_order, out_features)
+    # Define a function to solve lstsq for each feature
+    def solve_feature(a, b):
+        return jnp.linalg.lstsq(a, b, rcond=None)[0]  # (grid_size + spline_order, out_features)
 
-    # # Vectorize the function over the first axis (in_features)
-    # vectorized_solve = jax.vmap(solve_feature, in_axes=(0, 0), out_axes=0)
+    # Vectorize the function over the first axis (in_features)
+    vectorized_solve = jax.vmap(solve_feature, in_axes=(0, 0), out_axes=0)
 
-    # # Apply the vectorized function
-    # coeffs = vectorized_solve(A, B)  # (in_features, grid_size + spline_order, out_features)
-    # result = coeffs.transpose((2, 0, 1))  # Transpose to (out_features, in_features, grid_size + spline_order)
+    # Apply the vectorized function
+    coeffs_f = vectorized_solve(A_f, B_f)  # (in_features, grid_size + spline_order, out_features)
+    result_f = coeffs_f.transpose((2, 0, 1))  # Transpose to (out_features, in_features, grid_size + spline_order)
     
-    # assert result.shape == (self.out_features, self.in_features, self.grid_size + self.spline_order)
-
-
-
-    # Update the grid and spline weight in the module state
-    # spline_weight_f = flax_model.curve2coeff(input_tensor_f, unreduced_spline_output_f, grid_f)
-    # spline_weight_t = torch_module.curve2coeff(input_tensor_t, unreduced_spline_output_t)
-
-    # np.testing.assert_allclose(spline_weight_t.detach().numpy(), np.array(spline_weight_f), atol=1e-6, rtol=1e-6, err_msg="spline_weight do not match")
+    solution_t = torch.linalg.lstsq(
+            A_t, B_t
+        ).solution  # (in_features, grid_size + spline_order, out_features)
+    result_t = solution_t.permute(
+            2, 0, 1
+        )  # (out_features, in_features, grid_size + spline_order)
+    
+    np.testing.assert_allclose(result_t.detach().numpy(), np.array(result_f), atol=1e-5, rtol=1e-5, err_msg="result do not match")
