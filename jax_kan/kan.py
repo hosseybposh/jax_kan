@@ -74,7 +74,7 @@ class KANLinear(nn.Module):
         scale = self.scale_spline if not self.enable_standalone_scale_spline else 1.0
         return scale * self.curve2coeff(grid.T[self.spline_order:-self.spline_order], noise, grid)
     
-    def b_splines(self, x, grid):
+    def b_splines(self, x, grid, indicator = 'called not from test code'):
         '''
         Compute B-spline basis functions for given input data and grid.
 
@@ -90,19 +90,25 @@ class KANLinear(nn.Module):
 
         '''
         assert x.ndim == 2 and x.shape[1] == self.in_features
-        x = x[:, :, None]  # Expand dims to match grid dimensions
+        x = x[..., None]  # Expand dims to match grid dimensions
+        print(indicator)
+        print('b-splines call', x.shape, grid.shape)
+        print('First comparison', grid[:, :-1].shape)
+        print('Second comparison', grid[:, 1:].shape)
+        # print('First comparison', (x >= grid[:, :-1]).shape)
+        # print('Second comparison', (x < grid[:, 1:]).shape)
+
         bases = ((x >= grid[:, :-1]) & (x < grid[:, 1:])).astype(x.dtype)
         for k in range(1, self.spline_order + 1):
             bases = (
                 (x - grid[:, : -(k + 1)])
                 / (grid[:, k:-1] - grid[:, : -(k + 1)])
                 * bases[:, :, :-1]
-            ) + (
+                ) + (
                 (grid[:, k + 1 :] - x)
-                / (grid[:, k + 1 :] - grid[:, 1:-k])
+                / (grid[:, k + 1 :] - grid[:, 1:(-k)])
                 * bases[:, :, 1:]
             )
-
         assert bases.shape == (x.shape[0], self.in_features, self.grid_size + self.spline_order)
         return bases
     
@@ -166,33 +172,7 @@ class KANLinear(nn.Module):
         return base_output + spline_output
     
     def update_grid(self, x, margin=0.01):
-        '''
-        Updates the grid and spline weights in the module state based on the input data.
 
-        Parameters:
-        - x: The input data of shape (batch, in_features).
-        - margin: The margin added to the range of the input data for computing the uniform grid steps. Default is 0.01.
-
-        Returns:
-        - new_grid: The updated grid of shape (out_features, grid_size + 1).
-        - new_spline_weight: The updated spline weights of shape (in_features, out_features, coeff).
-
-        Raises:
-        - AssertionError: If the input data has incorrect shape.
-
-        This function updates the grid and spline weights in the module state based on the input data. It performs the following steps:
-        1. Computes the splines using the current grid and the input data.
-        2. Adjusts the spline weights based on the spline scaler and the standalone scale spline flag.
-        3. Computes the spline output without reduction.
-        4. Sorts each channel of the input data individually to collect data distribution.
-        5. Computes the adaptive grid by selecting values from the sorted input data.
-        6. Computes the uniform grid steps based on the range of the sorted input data and the margin.
-        7. Interpolates between the adaptive and uniform grid to obtain the final grid.
-        8. Transposes the grid and computes the new spline weights based on the input data, spline output, and the new grid.
-        9. Returns the updated grid and spline weights.
-
-        Note: The module state refers to the internal state of the module that holds the grid and spline weights.
-        '''
         # Use `lax.stop_gradient` only within the scope of this method
         x_no_grad = lax.stop_gradient(x)
         current_grid = lax.stop_gradient(self.variables['buffers']['grid'])
@@ -231,7 +211,7 @@ class KANLinear(nn.Module):
 
         # Update the grid and spline weight in the module state
         self.grid.value = grid.T
-        self.spline_weight.value = self.curve2coeff(x_no_grad, unreduced_spline_output, self.grid.value)
+        self.spline_weight.value = self.curve2coeff(x_no_grad, unreduced_spline_output, grid.T)
 
 class KAN(nn.Module):
     layers_hidden: list
@@ -269,3 +249,4 @@ class KAN(nn.Module):
         for layer in self.layers:
             total_loss += layer.regularization_loss(regularize_activation, regularize_entropy)
         return total_loss
+    
