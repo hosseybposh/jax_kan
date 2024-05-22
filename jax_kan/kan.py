@@ -180,6 +180,7 @@ class KANLinear(nn.Module):
         splines = jnp.transpose(splines, (1, 0, 2))  # (in_features, batch, coeff)
         scaled_spline_weight = spline_weight * (self.spline_scaler.value[..., None] if self.enable_standalone_scale_spline
             else 1.0)
+        # TODO this is the problem
         unreduced_spline_output = jnp.einsum('ibc,icd->ibd', splines, jnp.transpose(scaled_spline_weight, (1, 2, 0)))
         unreduced_spline_output = jnp.transpose(unreduced_spline_output, (1, 0, 2))  # (batch, in_features, out_features)
         
@@ -198,8 +199,8 @@ class KANLinear(nn.Module):
             grid[-1:] + uniform_step * jnp.arange(1, self.spline_order + 1)[:, None]
         ], axis=0).T
         self.variables['buffers']['grid'] = grid
-        new_weights = self.curve2coeff(x_no_grad, unreduced_spline_output, grid)
-        np.testing.assert_allclose(compare, np.array(unreduced_spline_output), atol=1e-6, rtol=1e-6, err_msg="oops")
+        new_weights = self.curve2coeff(x_no_grad, compare, grid) # This is the problem
+        # np.testing.assert_allclose(compare, np.array(unreduced_spline_output), atol=1e-6, rtol=1e-6, err_msg="oops")
         self.variables['params']['spline_weight'] = new_weights
 
 class KAN(nn.Module):
