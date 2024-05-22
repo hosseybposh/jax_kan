@@ -5,6 +5,7 @@ from jax.nn.initializers import variance_scaling, kaiming_uniform
 from jax import lax, ops
 from typing import Any
 from jax import random
+import numpy as np
 
 class KANLinear(nn.Module):
     in_features: int
@@ -74,7 +75,7 @@ class KANLinear(nn.Module):
         scale = self.scale_spline if not self.enable_standalone_scale_spline else 1.0
         return scale * self.curve2coeff(grid.T[self.spline_order:-self.spline_order], noise, grid)
     
-    def b_splines(self, x, grid, indicator = 'called not from test code'):
+    def b_splines(self, x, grid):
         '''
         Compute B-spline basis functions for given input data and grid.
 
@@ -91,12 +92,6 @@ class KANLinear(nn.Module):
         '''
         assert x.ndim == 2 and x.shape[1] == self.in_features
         x = x[..., None]  # Expand dims to match grid dimensions
-        print(indicator)
-        print('b-splines call', x.shape, grid.shape)
-        print('First comparison', grid[:, :-1].shape)
-        print('Second comparison', grid[:, 1:].shape)
-        # print('First comparison', (x >= grid[:, :-1]).shape)
-        # print('Second comparison', (x < grid[:, 1:]).shape)
 
         bases = ((x >= grid[:, :-1]) & (x < grid[:, 1:])).astype(x.dtype)
         for k in range(1, self.spline_order + 1):
@@ -140,11 +135,11 @@ class KANLinear(nn.Module):
         # Apply the vectorized function
         coeffs = vectorized_solve(A, B)  # (in_features, grid_size + spline_order, out_features)
         result = coeffs.transpose((2, 0, 1))  # Transpose to (out_features, in_features, grid_size + spline_order)
-        
+
         assert result.shape == (self.out_features, self.in_features, self.grid_size + self.spline_order)
         return result
     
-    def __call__(self, x, update_grid=False, margin=0.01):
+    def __call__(self, x):
         '''
         Applies the Kan function to the input tensor x.
 
@@ -162,7 +157,6 @@ class KANLinear(nn.Module):
 
         base_output = jnp.dot(self.base_activation(x), self.base_weight.value.T)
         # Calculate scaled_spline_weight within the call
-        # print(self.spline_weight.shape, self.spline_scaler[..., None].shape)
         scaled_spline_weight = self.spline_weight.value * (self.spline_scaler.value[..., None] if self.enable_standalone_scale_spline else 1.0)
 
         # Calculate spline output using b_splines
@@ -171,7 +165,7 @@ class KANLinear(nn.Module):
 
         return base_output + spline_output
     
-    def update_grid(self, x, margin=0.01):
+    def update_grid(self, x, compare, margin=0.01):
 
         # Use `lax.stop_gradient` only within the scope of this method
         x_no_grad = lax.stop_gradient(x)
@@ -179,39 +173,34 @@ class KANLinear(nn.Module):
         spline_weight = lax.stop_gradient(self.variables['params']['spline_weight'])
 
         assert x_no_grad.ndim == 2 and x_no_grad.shape[1] == self.in_features, f"Input data has incorrect shape: {x_no_grad.shape} expected ({2}, {self.in_features})"
-        batch = x_no_grad.shape[0]
+        batch_size = x_no_grad.shape[0]
         
         # Compute splines with the correct grid argument
         splines = self.b_splines(x_no_grad, current_grid)  # (batch, in_features, coeff)
         splines = jnp.transpose(splines, (1, 0, 2))  # (in_features, batch, coeff)
-
-        # Access and adjust the spline weights correctly
-        scaled_spline_weight = spline_weight * (self.spline_scaler.value[..., None] if self.enable_standalone_scale_spline else 1.0)
-
-        # Compute spline output without reduction
-        # print(splines.shape, self.spline_weight.value.shape, self.spline_scaler.value.shape, scaled_spline_weight.shape)
+        scaled_spline_weight = spline_weight * (self.spline_scaler.value[..., None] if self.enable_standalone_scale_spline
+            else 1.0)
         unreduced_spline_output = jnp.einsum('ibc,icd->ibd', splines, jnp.transpose(scaled_spline_weight, (1, 2, 0)))
         unreduced_spline_output = jnp.transpose(unreduced_spline_output, (1, 0, 2))  # (batch, in_features, out_features)
         
         # Sorting each channel individually to collect data distribution
         x_sorted = jnp.sort(x_no_grad, axis=0)
-        grid_adaptive = x_sorted.at[jnp.linspace(0, batch - 1, self.grid_size + 1, dtype=jnp.int32)].get()
-
+        grid_adaptive = x_sorted.at[jnp.linspace(0, batch_size - 1, self.grid_size + 1, dtype=jnp.int32)].get()
+        
         # Creating uniform grid steps
         uniform_step = (x_sorted[-1, :] - x_sorted[0, :] + 2 * margin) / self.grid_size
         grid_uniform = (jnp.arange(self.grid_size + 1)[:, None] * uniform_step + x_sorted[0, :] - margin)
-
         # Interpolate between adaptive and uniform grid
         grid = self.grid_eps * grid_uniform + (1 - self.grid_eps) * grid_adaptive
         grid = jnp.concatenate([
             grid[:1] - uniform_step * jnp.arange(self.spline_order, 0, -1)[:, None],
             grid,
             grid[-1:] + uniform_step * jnp.arange(1, self.spline_order + 1)[:, None]
-        ], axis=0)
-
-        # Update the grid and spline weight in the module state
-        self.grid.value = grid.T
-        self.spline_weight.value = self.curve2coeff(x_no_grad, unreduced_spline_output, grid.T)
+        ], axis=0).T
+        self.variables['buffers']['grid'] = grid
+        new_weights = self.curve2coeff(x_no_grad, unreduced_spline_output, grid)
+        np.testing.assert_allclose(compare, np.array(unreduced_spline_output), atol=1e-6, rtol=1e-6, err_msg="oops")
+        self.variables['params']['spline_weight'] = new_weights
 
 class KAN(nn.Module):
     layers_hidden: list

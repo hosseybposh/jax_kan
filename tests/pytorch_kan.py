@@ -102,7 +102,6 @@ class KANLinear(torch.nn.Module):
                 / (grid[:, k + 1 :] - grid[:, 1:(-k)])
                 * bases[:, :, 1:]
             )
-
         assert bases.size() == (
             x.size(0),
             self.in_features,
@@ -170,9 +169,7 @@ class KANLinear(torch.nn.Module):
         orig_coeff = self.scaled_spline_weight  # (out, in, coeff)
         orig_coeff = orig_coeff.permute(1, 2, 0)  # (in, coeff, out)
         unreduced_spline_output = torch.bmm(splines, orig_coeff)  # (in, batch, out)
-        unreduced_spline_output = unreduced_spline_output.permute(
-            1, 0, 2
-        )  # (batch, in, out)
+        unreduced_spline_output = unreduced_spline_output.permute(1, 0, 2)  # (batch, in, out)
         
         # sort each channel individually to collect data distribution
         x_sorted = torch.sort(x, dim=0)[0]
